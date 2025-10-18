@@ -1,0 +1,384 @@
+---
+title: "Forecast daily bike rental demand using time series models"
+author: 'E. Ntovoris'
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+About Data Analysis Report
+
+This RMarkdown file contains the report of the data analysis done for the project on forecasting daily bike rental demand using time series models in R. It contains analysis such as data exploration, summary statistics and building the time series models.
+
+Data Description:
+This dataset contains the daily count of rental bike transactions between years 2011 and 2012 in Capital Bikeshare system with the corresponding weather and seasonal information.
+
+Data Source: https://archive.ics.uci.edu/ml/datasets/bike+sharing+dataset
+
+Relevant Paper: Fanaee-T, Hadi, and Gama, Joao, 'Event labeling combining ensemble detectors and background knowledge', Progress in Artificial Intelligence (2013): pp. 1-15, Springer Berlin Heidelberg
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.width = 9, fig.height = 5)
+# Load required packages
+library(data.table)
+library(timetk)
+library(forecast)
+library(tseries)
+library(ggplot2)
+library(lubridate)
+library(plotly)
+library(TTR)
+```
+
+# ============================================================================
+# TASK 1: Load and Explore the Data
+# ============================================================================
+```{r, echo = FALSE}
+data("bike_sharing_daily")
+bike_data <- as.data.table(bike_sharing_daily)
+str(bike_data)
+summary(bike_data)
+setnames(bike_data, old = c("cnt", "temp", "atemp", "hum", "windspeed"), 
+         new = c("total_count", "temperature", "feel_temp", "humidity", "wind_speed"),
+         skip_absent = TRUE)
+names(bike_data)
+```
+
+## Describe and explore the data
+```{r, echo = FALSE}
+cat("\n=== Dataset Overview ===\n")
+cat("Date Range:", as.character(min(bike_data$dteday)), "to", 
+    as.character(max(bike_data$dteday)), "\n")
+cat("Total observations:", nrow(bike_data), "\n")
+cat("Missing values:\n")
+print(colSums(is.na(bike_data)))
+
+cat("\n=== Correlation Analysis ===\n")
+cor_temp_cnt <- cor(bike_data$temperature, bike_data$total_count)
+cor_feel_cnt <- cor(bike_data$feel_temp, bike_data$total_count)
+cor_temp_feel <- cor(bike_data$temperature, bike_data$feel_temp)
+
+cat("Correlation between temperature and total count:", round(cor_temp_cnt, 3), "\n")
+cat("Correlation between feeling temperature and total count:", round(cor_feel_cnt, 3), "\n")
+cat("Correlation between temperature and feeling temperature:", round(cor_temp_feel, 3), "\n")
+
+cat("\n=== Seasonal Statistics ===\n")
+season_stats <- bike_data[, .(
+  mean_temp = mean(temperature),
+  median_temp = median(temperature),
+  mean_rentals = mean(total_count),
+  median_rentals = median(total_count)
+), by = season]
+print(season_stats)
+
+# Monthly 
+cat("\n=== Monthly Statistics ===\n")
+monthly_stats <- bike_data[, .(
+  mean_temp = mean(temperature),
+  mean_humidity = mean(humidity),
+  mean_windspeed = mean(wind_speed),
+  mean_rentals = mean(total_count)
+), by = mnth]
+print(monthly_stats)
+
+# User type 
+cat("\n=== User Type Analysis ===\n")
+cor_temp_reg <- cor(bike_data$temperature, bike_data$registered)
+cor_temp_casual <- cor(bike_data$temperature, bike_data$casual)
+cat("Correlation between temperature and registered users:", round(cor_temp_reg, 3), "\n")
+cat("Correlation between temperature and casual users:", round(cor_temp_casual, 3), "\n")
+
+# Visualizations
+# Temperature by season
+ggplot(bike_data, aes(x = factor(season), y = temperature, fill = factor(season))) +
+  geom_boxplot() +
+  labs(title = "Temperature Distribution by Season",
+       x = "Season (1:Spring, 2:Summer, 3:Fall, 4:Winter)",
+       y = "Normalized Temperature") +
+  theme_minimal()
+
+# Rentals vs Temperature
+ggplot(bike_data, aes(x = temperature, y = total_count)) +
+  geom_point(alpha = 0.5, color = "steelblue") +
+  geom_smooth(method = "lm", color = "red") +
+  labs(title = "Bike Rentals vs Temperature",
+       x = "Normalized Temperature",
+       y = "Total Rentals") +
+  theme_minimal()
+
+
+```
+
+
+# ============================================================================
+# TASK 2: Create Interactive Time Series Plots
+# ============================================================================
+```{r, echo = FALSE}
+
+bike_data[, year := year(dteday)]
+
+p1 <- bike_data %>%
+  plot_time_series(
+    .date_var = dteday,
+    .value = total_count,
+    .color_var = factor(year),
+    .interactive = FALSE,
+    .plotly_slider = TRUE,
+    .title = "Daily Bike Rentals Over Time"
+  )
+print(p1)
+
+# Seasonal diagnostics
+p2 <- bike_data %>%
+  plot_seasonal_diagnostics(
+    .date_var = dteday,
+    .value = total_count,
+    .interactive = FALSE,
+    .title = "Seasonal Diagnostics for Bike Rentals"
+  )
+print(p2)
+
+# Anomaly diagnostics
+p3 <- bike_data %>%
+  plot_anomaly_diagnostics(
+    .date_var = dteday,
+    .value = total_count,
+    .interactive = FALSE,
+    .title = "Anomaly Detection in Bike Rentals"
+  )
+print(p3)
+
+# ACF diagnostics
+p4 <- bike_data %>%
+  plot_acf_diagnostics(
+    .date_var = dteday,
+    .value = total_count,
+    .interactive = FALSE,
+    .title = "ACF Diagnostics for Bike Rentals"
+  )
+print(p4)
+
+
+```
+
+# ============================================================================
+# TASK 3: Smooth Time Series Data
+# ============================================================================
+```{r,echo = FALSE}
+
+ts_count <- ts(bike_data$total_count, frequency = 365)
+
+ts_clean <- tsclean(ts_count)
+
+n_outliers <- sum(ts_count != ts_clean, na.rm = TRUE)
+cat("Number of outliers replaced:", n_outliers, "\n")
+
+bike_data[, count_clean := as.numeric(ts_clean)]
+
+# Simple Exponential Smoothing
+ses_model <- HoltWinters(ts_clean, beta = FALSE, gamma = FALSE)
+ses_forecast <- forecast(ses_model, h = 25)
+
+# Simple Moving Average (order 10)
+sma_10 <- SMA(ts_clean, n = 10)
+
+plot(ts_clean, main = "Original vs Smoothed Time Series",
+     ylab = "Normalized Count", xlab = "Time")
+lines(ses_model$fitted[,1], col = "red", lwd = 2)
+lines(sma_10, col = "blue", lwd = 2)
+legend("topleft", legend = c("Original", "SES", "SMA(10)"),
+       col = c("black", "red", "blue"), lty = 1, lwd = 2)
+
+plot(ses_forecast, main = "Simple Exponential Smoothing Forecast",
+     ylab = "Normalized Count", xlab = "Time")
+
+cat("\n=== Smoothing Results ===\n")
+cat("Simple Exponential Smoothing alpha:", round(ses_model$alpha, 4), "\n")
+hist(residuals(ses_model))
+acf(residuals(ses_model))
+cat("SES RMSE:", round(Metrics::rmse(ts_clean, fitted(ses_model)), 4), "\n")
+
+```
+
+# ============================================================================
+# TASK 4: Decompose and Assess Stationarity
+# ============================================================================
+```{r, echo = FALSE}
+
+# Decompose using STL (Seasonal and Trend decomposition using Loess)
+ts_decomp <- stl(ts_clean, s.window = "periodic")
+
+plot(ts_decomp, main = "STL Decomposition of Bike Rentals")
+
+trend_component <- ts_decomp$time.series[, "trend"]
+seasonal_component <- ts_decomp$time.series[, "seasonal"]
+remainder_component <- ts_decomp$time.series[, "remainder"]
+
+ts_deseason <- ts_clean - seasonal_component
+
+plot(ts_deseason, main = "Deseasonalized Time Series",
+     ylab = "Normalized Count", xlab = "Time")
+
+
+cat("\n=== Stationarity Tests ===\n")
+
+# Original series
+adf_original <- adf.test(ts_clean)
+cat("\nADF Test - Original Series:\n")
+cat("Test Statistic:", round(adf_original$statistic, 4), "\n")
+cat("P-value:", round(adf_original$p.value, 4), "\n")
+
+# Deseasonalized series
+adf_deseason <- adf.test(ts_deseason)
+cat("\nADF Test - Deseasonalized Series:\n")
+cat("Test Statistic:", round(adf_deseason$statistic, 4), "\n")
+cat("P-value:", round(adf_deseason$p.value, 4), "\n")
+
+# ACF and PACF plots
+par(mfrow = c(2, 2))
+acf(ts_clean, main = "ACF - Original Series", lag.max = 50)
+pacf(ts_clean, main = "PACF - Original Series", lag.max = 50)
+acf(ts_deseason, main = "ACF - Deseasonalized Series", lag.max = 50)
+pacf(ts_deseason, main = "PACF - Deseasonalized Series", lag.max = 50)
+par(mfrow = c(1, 1))
+
+if (adf_original$p.value >= 0.05) {
+  cat("\n=== Making Series Stationary with Differencing ===\n")
+
+  ndiffs_result <- ndiffs(ts_clean, test = "kpss")
+  cat("Number of differences needed:", ndiffs_result, "\n")
+
+  ts_diff <- diff(ts_clean, differences = ndiffs_result)
+
+  adf_diff <- adf.test(ts_diff)
+  cat("\nADF Test - Differenced Series:\n")
+  cat("Test Statistic:", round(adf_diff$statistic, 4), "\n")
+  cat("P-value:", round(adf_diff$p.value, 4), "\n")
+
+  plot(ts_diff, main = "Differenced Time Series",
+       ylab = "Differenced Normalized Count", xlab = "Time")
+}
+
+```
+
+# ============================================================================
+# TASK 5: Fit and Forecast using ARIMA Models
+# ============================================================================
+```{r, echo = FALSE}
+
+cat("\n--- Using STLM with auto.arima ---\n")
+
+stlm_model <- stlm(ts_clean, s.window = "periodic", modelfunction = auto.arima)
+
+cat("\nSTLM Model Summary:\n")
+print(summary(stlm_model))
+
+cat("\n=== Residual Diagnostics ===\n")
+
+checkresiduals(stlm_model)
+
+# Shapiro-Wilk normality test
+shapiro_stlm <- shapiro.test(stlm_model$residuals)
+cat("\nShapiro-Wilk Test for STLM Residuals:\n")
+cat("Test Statistic:", round(shapiro_stlm$statistic, 4), "\n")
+cat("P-value:", round(shapiro_stlm$p.value, 4), "\n")
+
+
+# Histogram of residuals
+hist(stlm_model$residuals, breaks = 30, 
+     main = "Histogram of STLM Model Residuals",
+     xlab = "Residuals", col = "lightblue", probability = TRUE)
+lines(density(stlm_model$residuals), col = "red", lwd = 2)
+curve(dnorm(x, mean = mean(stlm_model$residuals), sd = sd(stlm_model$residuals)),
+      add = TRUE, col = "blue", lwd = 2, lty = 2)
+legend("topright", legend = c("Actual", "Normal"), 
+       col = c("red", "blue"), lty = c(1, 2), lwd = 2)
+
+# Ljung-Box test for autocorrelation in residuals
+lb_test <- Box.test(stlm_model$residuals, lag = 20, type = "Ljung-Box")
+cat("\nLjung-Box Test:\n")
+cat("Test Statistic:", round(lb_test$statistic, 4), "\n")
+cat("P-value:", round(lb_test$p.value, 4), "\n")
+cat("Result:", ifelse(lb_test$p.value > 0.05, 
+                      "Can't reject H0", 
+                      "Autocorrelation present in residuals"), "\n")
+
+adf_res <- adf.test(stlm_model$residuals)
+cat("\nADF Test - Residuals:\n")
+cat("Test Statistic:", round(adf_res$statistic, 4), "\n")
+cat("P-value:", round(adf_res$p.value, 4), "\n")
+
+trend <- as.numeric(ts_decomp$time.series[, "trend"])
+seasonal <- as.numeric(ts_decomp$time.series[, "seasonal"])
+remainder <- as.numeric(ts_decomp$time.series[, "remainder"])
+
+bike_data[, `:=`(
+  trend = trend,
+  seasonal = seasonal,
+  remainder = remainder
+)]
+
+component_plot_data <- data.frame(
+  Date = bike_data$dteday,
+  Trend = bike_data$trend,
+  Seasonal = bike_data$seasonal,
+  Remainder = bike_data$remainder
+)
+
+component_plot_long <- reshape2::melt(component_plot_data, id.vars = "Date")
+
+ggplot(component_plot_long, aes(x = Date, y = value, fill = variable)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Component Contributions",
+       x = "Date", y = "Component Value") +
+  theme_minimal() +
+  theme(legend.title = element_blank())
+
+
+
+
+cat("\n=== Forecasting ===\n")
+stlm_forecast <- forecast(stlm_model, h = 25)
+
+plot(stlm_forecast, main = "STLM Forecast for Next 25 Days",
+     ylab = "Normalized Count", xlab = "Time")
+
+cat("\nForecast for next 25 days:\n")
+print(stlm_forecast)
+
+cat("\n--- Alternative: Direct auto.arima ---\n")
+
+auto_arima_model <- auto.arima(ts_clean, seasonal = TRUE)
+
+cat("\nAuto ARIMA Model:\n")
+print(summary(auto_arima_model))
+
+shapiro_arima <- shapiro.test(auto_arima_model$residuals)
+cat("\nShapiro-Wilk Test for Auto ARIMA Residuals:\n")
+cat("Test Statistic:", round(shapiro_arima$statistic, 4), "\n")
+cat("P-value:", round(shapiro_arima$p.value, 4), "\n")
+
+
+arima_forecast <- forecast(auto_arima_model, h = 25)
+
+par(mfrow = c(2, 1))
+plot(stlm_forecast, main = "STLM Forecast")
+plot(arima_forecast, main = "Auto ARIMA Forecast")
+par(mfrow = c(1, 1))
+
+cat("\n=== Model Comparison ===\n")
+cat("\nSTLM Model Accuracy:\n")
+print(accuracy(stlm_model))
+
+cat("\nAuto ARIMA Model Accuracy:\n")
+print(forecast::accuracy(auto_arima_model))
+
+cat("\n=== Model Selection ===\n")
+cat("STLM AIC:", round(stlm_model$model$aic, 2), "\n")
+cat("Auto ARIMA AIC:", round(auto_arima_model$aic, 2), "\n")
+cat("\nBest Model:", ifelse(stlm_model$model$aic < auto_arima_model$aic, 
+                             "STLM", "Auto ARIMA"), "(Lower AIC is better)\n")
+
+
+
+```
